@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>doc-converter</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>Document Converter Service</name>
+    <description>Docker image with JDK 21 + Playwright + LibreOffice Headless</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <playwright.version>1.50.0</playwright.version>
+    </properties>
+
+    <!--
+        pdfbox / poi-ooxml 已移除：url-to-docx / url-to-pdf 工具只用 Playwright
+        （抓网页打印 PDF）+ 外部 LibreOffice 进程（PDF 转 docx），从没用过这两个库
+        做文本抽取或拼 docx，留着只是白占几十 MB jar 体积。
+        spring-boot-maven-plugin 同理移除：这不是一个 Spring Boot 应用。
+    -->
+    <dependencies>
+        <!-- Playwright Java -->
+        <dependency>
+            <groupId>com.microsoft.playwright</groupId>
+            <artifactId>playwright</artifactId>
+            <version>${playwright.version}</version>
+        </dependency>
+
+        <!-- SLF4J + Logback -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.5.12</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Maven Compiler Plugin -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <source>21</source>
+                    <target>21</target>
+                </configuration>
+            </plugin>
+
+            <!-- Shade Plugin 用于创建可执行 JAR -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.example.converter.UrlToDocx</mainClass>
+                                </transformer>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                                <!--
+                                    真正装着 5 个平台各一份完整 Node.js 驱动的是 playwright 的两个
+                                    传递依赖 com.microsoft.playwright:driver 和 :driver-bundle
+                                    （mac/mac-arm64/linux/linux-arm64/win32_x64，每份 80~120MB），
+                                    不是 playwright 主 jar 本体（用 mvn -X 看 shade 日志确认过）。
+                                    这个工具只会跑在 Linux 容器里，mac* 和 win32_x64 那三份永远
+                                    用不上，砍掉能让 fat jar 瘦身 ~300MB。linux 和 linux-arm64 两份
+                                    都保留，兼顾 amd64/arm64 两种容器宿主机。
+                                -->
+                                <filter>
+                                    <artifact>com.microsoft.playwright:driver</artifact>
+                                    <excludes>
+                                        <exclude>driver/mac/**</exclude>
+                                        <exclude>driver/mac-arm64/**</exclude>
+                                        <exclude>driver/win32_x64/**</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>com.microsoft.playwright:driver-bundle</artifact>
+                                    <excludes>
+                                        <exclude>driver/mac/**</exclude>
+                                        <exclude>driver/mac-arm64/**</exclude>
+                                        <exclude>driver/win32_x64/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

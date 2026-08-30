@@ -1,0 +1,29 @@
+# 构建产物
+target/
+dist/
+dependency-reduced-pom.xml
+*.class
+
+# 本地运行时数据 / 测试输出
+data/
+output/
+
+# 本地环境配置（不进版本库）
+.env
+.env.*
+
+# 与本项目无关的本机脚本（含硬编码密钥，禁止提交）
+img_generator.py
+
+# 早期测试留下的样例文件
+temp_page.pdf
+shanghai_policy.docx
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# 日志
+*.log
