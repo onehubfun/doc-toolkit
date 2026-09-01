@@ -17,9 +17,9 @@
 - [设计说明 / 已知限制](#设计说明--已知限制)
 - [常见问题](#常见问题)
 
-> **本次更新(相对上一版)**:新增了应对"瑞数(RuiShu)"反爬网关的处理路径——`scripts/rs-fetch.js` +
-> `HtmlToPdf`/`HtmlToDocx` 两个新工具类。详见下方[遇到瑞数(RuiShu)防护的网站怎么办](#遇到瑞数ruishu防护的网站怎么办)一节。
-> 这条路径**还没有接入 `Dockerfile`/`entrypoint.sh` 的自动化流程**，目前是手动两步跑，如实记录，不夸大集成程度。
+> **本次更新(相对上一版)**:`Node.js + sdenv` 已经直接打进 `Dockerfile` 里了,不用再单独拉 `pysunday/sdenv-*`
+> 镜像——现在同一个 `doc-toolkit` 镜像里既能跑 Java 工具也能跑 `scripts/rs-fetch.js`,应对"瑞数(RuiShu)"反爬网关
+> 只需要两条 `docker run` 命令,都指向这一个镜像。详见下方[遇到瑞数(RuiShu)防护的网站怎么办](#遇到瑞数ruishu防护的网站怎么办)一节。
 
 ---
 
@@ -31,9 +31,10 @@
 | Playwright 1.50.0 + Chromium | 只装 Chromium 一个浏览器内核(不含 Firefox/WebKit/ffmpeg),内置工具只用得到 Chromium |
 | LibreOffice(`writer` + `pdfimport`) | 只装 PDF→DOCX 转换用得到的最小组件集,不含 Impress/Calc/Draw |
 | 字体:`fonts-liberation` / `fonts-noto-cjk` / `fonts-wqy-zenhei` | Word 兼容西文字体 + 中文渲染 |
-| 内置工具 jar(`/app/app.jar`) | 四个 CLI 工具:`UrlToDocx`(默认)、`UrlToPdf`、`HtmlToPdf`、`HtmlToDocx`(后两个配合 `scripts/rs-fetch.js` 处理瑞数防护网站,见下文) |
+| 内置工具 jar(`/app/app.jar`) | 四个 CLI 工具:`UrlToDocx`(默认)、`UrlToPdf`、`HtmlToPdf`、`HtmlToDocx` |
+| Node.js 20 + [sdenv](https://github.com/pysunday/sdenv) + `/app/rs-fetch.js` | 应对"瑞数(RuiShu)"反爬网关(见[遇到瑞数防护的网站怎么办](#遇到瑞数ruishu防护的网站怎么办)),`sdenv` 依赖的 `canvas` 原生模块是构建时针对本镜像的 Ubuntu 22.04 环境现场编译的,不是从别处复制的预编译二进制 |
 
-镜像大小约 **3GB**(JDK 版;如果你不需要 `javac` 只想跑现成 jar,把最终阶段基础镜像换成 `eclipse-temurin:21-jre-jammy` 能再省 ~270MB,见[构建镜像](#构建镜像))。
+镜像大小约 **3.5GB**(JDK 版,含 Node.js/sdenv;如果你不需要 `javac` 只想跑现成 jar,把最终阶段基础镜像换成 `eclipse-temurin:21-jre-jammy` 能再省一些体积,见[构建镜像](#构建镜像))。
 
 ## 快速开始
 
@@ -131,18 +132,20 @@ docker run --rm --entrypoint java doc-toolkit:latest -cp /app/user/my-app.jar co
 
 真正验证有效的是 [sdenv](https://github.com/pysunday/sdenv)——它不启动真实浏览器,而是用改造过的 `jsdom` 在 Node.js 里模拟浏览器环境去跑瑞数的验证 JS。因为它根本不是被 CDP 控制的真实浏览器,天然绕开了上面那个检测点。
 
-### 完整流程(目前是手动两步,还没接入 Dockerfile)
+`sdenv` + `scripts/rs-fetch.js` 已经直接打进 `doc-toolkit` 镜像了(`/app/rs-fetch.js`,Node.js 20),不需要再单独拉 `pysunday/sdenv-*` 镜像。
+
+> `sdenv` 依赖 `canvas` 这个原生模块,构建时会用 `node-gyp` 针对当前构建机器的 CPU 架构现场编译(见 `Dockerfile` 里的 `sdenv-builder` 阶段),不是复制别人预编译好的二进制——所以不管你在 x86_64(比如 Windows WSL2、常见的云服务器)还是 arm64(比如 Apple Silicon Mac)上执行 `docker build`,都会自动编译出适配当前架构的版本,不需要手动改 `Dockerfile` 或指定架构参数。
+
+### 完整流程(两条命令,同一个镜像)
 
 ```bash
-# 第一步：用 sdenv 的官方镜像把瑞数验证过一遍，拿到真实 HTML
-docker run --rm \
-  -v "$(pwd)/scripts/rs-fetch.js:/app/myapp:ro" \
+# 第一步：用镜像里内置的 rs-fetch.js 把瑞数验证过一遍，拿到真实 HTML
+# （需要用 --entrypoint 覆盖默认入口，直接跑 node）
+docker run --rm --entrypoint node \
   -v "$(pwd)/output:/output" \
-  -e NODE_PATH=/usr/local/lib/node_modules \
-  pysunday/sdenv-arm64:latest myapp "https://目标网址" /output/page.html
+  doc-toolkit:latest /app/rs-fetch.js "https://目标网址" /output/page.html
 
-# 第二步：用 doc-toolkit 把这段 HTML 渲染成 PDF 或 DOCX
-# （需要用 --entrypoint 覆盖默认入口，直接指定跑 HtmlToPdf/HtmlToDocx）
+# 第二步：把这段 HTML 渲染成 PDF 或 DOCX（同一个镜像）
 docker run --rm --entrypoint java \
   -v "$(pwd)/output:/output" \
   doc-toolkit:latest \
@@ -164,7 +167,9 @@ java -cp app.jar com.example.converter.HtmlToPdf  <html文件路径> <baseUrl> [
 java -cp app.jar com.example.converter.HtmlToDocx <html文件路径> <baseUrl> [output.docx]
 ```
 
-**已知限制**:这条路径只验证过"瑞数保护 + 服务端渲染(SSR)"的网站。`rs-fetch.js` 最后一步是用 Node 内置 `fetch()` 拿服务器原始响应文本,**不会执行目标页面自己的 JS**——如果目标是 Vue/React 这类客户端动态渲染(CSR)的 SPA,大概率只能拿到一个空壳(`<div id="app"></div>`),内容还没来得及渲染。真遇到这种站点需要额外改造(见对话记录里的分析),没有现成方案。
+**已知限制**:
+- 这条路径只验证过"瑞数保护 + 服务端渲染(SSR)"的网站。`rs-fetch.js` 最后一步是用 Node 内置 `fetch()` 拿服务器原始响应文本,**不会执行目标页面自己的 JS**——如果目标是 Vue/React 这类客户端动态渲染(CSR)的 SPA,大概率只能拿到一个空壳(`<div id="app"></div>`),内容还没来得及渲染。真遇到这种站点需要额外改造,没有现成方案。
+- 部分图片可能因为防盗链(Referer 校验)加载失败,被替换成占位图标——实测过陕西省税务局某篇文章里带 `s_` 前缀的"微信来源"图片就触发了这个问题,同一篇文章里的其他普通图片、以及北京市税务局站点的图片都没有这个问题,说明是个别网站自己的图片服务器策略,不是通用问题。`HtmlToPdf`/`HtmlToDocx` 目前没有处理这个(需要在渲染时给图片请求补 `Referer` header)。
 
 ## 构建镜像
 
