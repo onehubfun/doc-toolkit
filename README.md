@@ -12,9 +12,14 @@
 - [快速开始](#快速开始)
 - [环境变量](#环境变量)
 - [跑你自己的程序](#跑你自己的程序)
+- [遇到瑞数(RuiShu)防护的网站怎么办](#遇到瑞数ruishu防护的网站怎么办)
 - [构建镜像](#构建镜像)
 - [设计说明 / 已知限制](#设计说明--已知限制)
 - [常见问题](#常见问题)
+
+> **本次更新(相对上一版)**:新增了应对"瑞数(RuiShu)"反爬网关的处理路径——`scripts/rs-fetch.js` +
+> `HtmlToPdf`/`HtmlToDocx` 两个新工具类。详见下方[遇到瑞数(RuiShu)防护的网站怎么办](#遇到瑞数ruishu防护的网站怎么办)一节。
+> 这条路径**还没有接入 `Dockerfile`/`entrypoint.sh` 的自动化流程**，目前是手动两步跑，如实记录，不夸大集成程度。
 
 ---
 
@@ -26,7 +31,7 @@
 | Playwright 1.50.0 + Chromium | 只装 Chromium 一个浏览器内核(不含 Firefox/WebKit/ffmpeg),内置工具只用得到 Chromium |
 | LibreOffice(`writer` + `pdfimport`) | 只装 PDF→DOCX 转换用得到的最小组件集,不含 Impress/Calc/Draw |
 | 字体:`fonts-liberation` / `fonts-noto-cjk` / `fonts-wqy-zenhei` | Word 兼容西文字体 + 中文渲染 |
-| 内置工具 jar(`/app/app.jar`) | 两个 CLI 工具:`UrlToDocx`(默认)、`UrlToPdf` |
+| 内置工具 jar(`/app/app.jar`) | 四个 CLI 工具:`UrlToDocx`(默认)、`UrlToPdf`、`HtmlToPdf`、`HtmlToDocx`(后两个配合 `scripts/rs-fetch.js` 处理瑞数防护网站,见下文) |
 
 镜像大小约 **3GB**(JDK 版;如果你不需要 `javac` 只想跑现成 jar,把最终阶段基础镜像换成 `eclipse-temurin:21-jre-jammy` 能再省 ~270MB,见[构建镜像](#构建镜像))。
 
@@ -119,6 +124,47 @@ ENV APP_MAIN_CLASS=com.yourcompany.Main
 docker run --rm --entrypoint bash doc-toolkit:latest
 docker run --rm --entrypoint java doc-toolkit:latest -cp /app/user/my-app.jar com.yourcompany.Main
 ```
+
+## 遇到瑞数(RuiShu)防护的网站怎么办
+
+标准 `UrlToDocx`/`UrlToPdf`(不管怎么伪装 UA、打补丁隐藏 `navigator.webdriver`)对"瑞数"这类反爬网关一律失败——实测过标准 Chromium、Camoufox(Firefox 内核指纹伪装)、CloakBrowser(号称"过所有检测"的商业方案)三种真实浏览器方案,全部卡在同一步:JS 挑战能跑,生成的验证 cookie 也发出去了,但服务端返回 400。猜测是瑞数检测的是"这个浏览器是不是被 CDP/自动化协议接管"这个底层信号,不是简单的指纹伪装能绕过的(不管伪装得多像真人,只要是 Playwright/Puppeteer 控制的真实浏览器,这条底层痕迹都在)。
+
+真正验证有效的是 [sdenv](https://github.com/pysunday/sdenv)——它不启动真实浏览器,而是用改造过的 `jsdom` 在 Node.js 里模拟浏览器环境去跑瑞数的验证 JS。因为它根本不是被 CDP 控制的真实浏览器,天然绕开了上面那个检测点。
+
+### 完整流程(目前是手动两步,还没接入 Dockerfile)
+
+```bash
+# 第一步：用 sdenv 的官方镜像把瑞数验证过一遍，拿到真实 HTML
+docker run --rm \
+  -v "$(pwd)/scripts/rs-fetch.js:/app/myapp:ro" \
+  -v "$(pwd)/output:/output" \
+  -e NODE_PATH=/usr/local/lib/node_modules \
+  pysunday/sdenv-arm64:latest myapp "https://目标网址" /output/page.html
+
+# 第二步：用 doc-toolkit 把这段 HTML 渲染成 PDF 或 DOCX
+# （需要用 --entrypoint 覆盖默认入口，直接指定跑 HtmlToPdf/HtmlToDocx）
+docker run --rm --entrypoint java \
+  -v "$(pwd)/output:/output" \
+  doc-toolkit:latest \
+  -cp /app/app.jar com.example.converter.HtmlToDocx /output/page.html "https://目标网址所在域名/" /output/result.docx
+```
+
+`scripts/rs-fetch.js` 的退出码约定(方便写脚本判断分支):
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 是瑞数网站,已成功拿到内容,HTML 写入指定文件 |
+| `2` | **不是**瑞数网站,不算错误,应该直接用标准 `UrlToDocx`/`UrlToPdf` |
+| `1` | 是瑞数网站,但流程失败(超时/验证不通过/网络错误),stdout 最后一行 JSON 里带具体 `reason` |
+
+`HtmlToPdf`/`HtmlToDocx` 拿到 HTML 之后,不会再对目标网址发起新的 `page.navigate()`(那样又会撞回瑞数拦截),而是用 `page.setContent()` 在本地把这段 HTML 注入渲染,并在 `<head>` 里插入 `<base href="...">` 让相对路径的图片/资源能正确解析下载。
+
+```bash
+java -cp app.jar com.example.converter.HtmlToPdf  <html文件路径> <baseUrl> [output.pdf]
+java -cp app.jar com.example.converter.HtmlToDocx <html文件路径> <baseUrl> [output.docx]
+```
+
+**已知限制**:这条路径只验证过"瑞数保护 + 服务端渲染(SSR)"的网站。`rs-fetch.js` 最后一步是用 Node 内置 `fetch()` 拿服务器原始响应文本,**不会执行目标页面自己的 JS**——如果目标是 Vue/React 这类客户端动态渲染(CSR)的 SPA,大概率只能拿到一个空壳(`<div id="app"></div>`),内容还没来得及渲染。真遇到这种站点需要额外改造(见对话记录里的分析),没有现成方案。
 
 ## 构建镜像
 
